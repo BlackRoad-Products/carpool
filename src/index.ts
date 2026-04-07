@@ -26,7 +26,15 @@ function routeQuery(q: string): typeof AGENTS[0] {
 
 function page(): Response {
   const html=`<!DOCTYPE html><html lang="en"><head>
-<meta charset="UTF-8"><title>CarPool — Agent Router</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CarPool — Agent Router</title>
+<meta name="description" content="Intelligent multi-agent task routing. 8 specialist pools across 27 agents.">
+<link rel="canonical" href="https://carpool.blackroad.io/">
+<meta property="og:title" content="CarPool — Agent Router">
+<meta property="og:description" content="Intelligent multi-agent task routing. 8 specialist pools across 27 agents.">
+<meta property="og:url" content="https://carpool.blackroad.io/">
+<meta property="og:type" content="website">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"CarPool","url":"https://carpool.blackroad.io/","description":"Intelligent multi-agent task routing. 8 specialist pools across 27 agents.","applicationCategory":"WebApplication","publisher":{"@type":"Organization","name":"BlackRoad OS, Inc.","url":"https://blackroad.io"}}</script>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
