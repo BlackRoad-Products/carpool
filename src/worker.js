@@ -143,7 +143,88 @@ export default {
 
     // Serve HTML before DB init
     if (p === '/' || p === '') return new Response(HTML, {headers:{'Content-Type':'text/html;charset=utf-8','Content-Security-Policy':"frame-ancestors 'self' https://blackroad.io https://*.blackroad.io",...cors}});
-    if (p === '/health') return json({ok:true,service:'carpool',version:'2.0.0'},cors);
+    // Analytics tracking
+    if (p === '/api/track' && request.method === 'POST') {
+      try { const body = await request.json(); const cf = request.cf || {};
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT DEFAULT 'pageview', path TEXT, referrer TEXT, country TEXT, city TEXT, device TEXT, screen TEXT, scroll_depth INTEGER DEFAULT 0, engagement_ms INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))").run();
+        await env.DB.prepare('INSERT INTO analytics_events (type, path, referrer, country, city, device, screen, scroll_depth, engagement_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(body.type||'pageview', body.path||'/', body.referrer||'', cf.country||'', cf.city||'', body.device||'', body.screen||'', body.scroll||0, body.time||0).run();
+      } catch(e) {}
+      return new Response(JSON.stringify({ok:true}), {headers:{'Content-Type':'application/json'}});
+    }
+
+    // ── Sovereign Analytics ──
+    if (p === '/api/analytics' && request.method === 'POST') {
+      try {
+        const body = await request.json();
+        const cf = request.cf || {};
+        const ip = request.headers.get('CF-Connecting-IP') || '';
+        const ipHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ip + '2026'));
+        const visitor = btoa(String.fromCharCode(...new Uint8Array(ipHash))).slice(0,12);
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS br_analytics (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, referrer TEXT, visitor TEXT, country TEXT, city TEXT, screen TEXT, ts TEXT DEFAULT (datetime('now')))`).run();
+        await env.DB.prepare('INSERT INTO br_analytics (path, referrer, visitor, country, city, screen) VALUES (?,?,?,?,?,?)').bind(body.path||'/', body.ref||'', visitor, cf.country||'', cf.city||'', (body.w||0)+'x'+(body.h||0)).run();
+      } catch(e){}
+      return new Response('ok', {headers:{'Access-Control-Allow-Origin':'*'}});
+    }
+    if (p === '/api/analytics/stats') {
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS br_analytics (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, referrer TEXT, visitor TEXT, country TEXT, city TEXT, screen TEXT, ts TEXT DEFAULT (datetime('now')))`).run();
+        const total = await env.DB.prepare('SELECT COUNT(*) as c FROM br_analytics').first();
+        const unique = await env.DB.prepare('SELECT COUNT(DISTINCT visitor) as c FROM br_analytics').first();
+        const today = await env.DB.prepare("SELECT COUNT(*) as c FROM br_analytics WHERE ts > datetime('now','-1 day')").first();
+        const pages = await env.DB.prepare('SELECT path, COUNT(*) as views FROM br_analytics GROUP BY path ORDER BY views DESC LIMIT 10').all();
+        const countries = await env.DB.prepare('SELECT country, COUNT(*) as c FROM br_analytics WHERE country != "" GROUP BY country ORDER BY c DESC LIMIT 10').all();
+        return new Response(JSON.stringify({total_views:total?.c||0,unique_visitors:unique?.c||0,today:today?.c||0,top_pages:pages?.results||[],top_countries:countries?.results||[]}),{headers:{'Access-Control-Allow-Origin':'*','Content-Type':'application/json'}});
+      } catch(e) { return new Response(JSON.stringify({error:'analytics unavailable'}),{status:500,headers:{'Content-Type':'application/json'}}); }
+    }
+    if (p === '/health' || p === '/api/health') return json({ok:true,service:'carpool',version:'2.0.0'},cors);
+
+    // ─── AI Model Comparison Pages ───
+    const CP_MODELS = [
+      { slug: 'gpt-4o', name: 'GPT-4o', provider: 'OpenAI', category: 'OpenAI', description: 'OpenAI flagship multimodal model with vision, audio, and text capabilities. Excels at complex reasoning and creative tasks.', strengths: ['Multimodal (text, vision, audio)', 'Strong reasoning and analysis', 'Excellent at creative writing', 'Large ecosystem and tool support'], weaknesses: ['Higher cost per token', 'Rate limits on free tier', 'Closed source'], bestFor: 'Complex multi-step tasks requiring reasoning, vision analysis, and creative output', pricing: '$2.50/1M input, $10/1M output', contextWindow: '128K tokens', speed: 'medium', related: ['gpt-4o-mini', 'claude-3-opus', 'gemini-2-pro'] },
+      { slug: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', category: 'OpenAI', description: 'Lightweight, cost-efficient version of GPT-4o optimized for speed and everyday tasks.', strengths: ['Very low cost', 'Fast response times', 'Good for simple tasks', '128K context window'], weaknesses: ['Less capable on complex reasoning', 'Weaker at nuanced writing', 'Limited multimodal'], bestFor: 'High-volume simple tasks, chatbots, and classification where cost matters', pricing: '$0.15/1M input, $0.60/1M output', contextWindow: '128K tokens', speed: 'fast', related: ['gpt-4o', 'claude-3-haiku', 'gemini-2-flash'] },
+      { slug: 'claude-3-opus', name: 'Claude 3 Opus', provider: 'Anthropic', category: 'Anthropic', description: 'Anthropic most capable model for complex analysis, math, coding, and nuanced understanding.', strengths: ['Exceptional reasoning depth', 'Strong at math and logic', 'Careful and nuanced responses', 'Excellent instruction following'], weaknesses: ['Slower generation speed', 'Higher cost', 'Smaller ecosystem than OpenAI'], bestFor: 'Research, complex analysis, long-form writing, and tasks requiring deep reasoning', pricing: '$15/1M input, $75/1M output', contextWindow: '200K tokens', speed: 'slow', related: ['claude-3-sonnet', 'gpt-4o', 'gemini-2-pro'] },
+      { slug: 'claude-3-sonnet', name: 'Claude 3 Sonnet', provider: 'Anthropic', category: 'Anthropic', description: 'Balanced performance and speed from Anthropic, ideal for most production workloads.', strengths: ['Great balance of quality and speed', 'Strong coding abilities', 'Good at following complex instructions', '200K context'], weaknesses: ['Not as deep as Opus for research', 'Moderate cost', 'Can be verbose'], bestFor: 'Production applications needing reliable quality with reasonable latency', pricing: '$3/1M input, $15/1M output', contextWindow: '200K tokens', speed: 'medium', related: ['claude-3-opus', 'claude-3-haiku', 'gpt-4o'] },
+      { slug: 'claude-3-haiku', name: 'Claude 3 Haiku', provider: 'Anthropic', category: 'Anthropic', description: 'Fastest and most affordable Claude model for lightweight, high-volume tasks.', strengths: ['Extremely fast responses', 'Very low cost', 'Good for classification and extraction', 'Reliable for structured output'], weaknesses: ['Limited reasoning on complex tasks', 'Less creative', 'Shorter effective context use'], bestFor: 'Real-time chat, content moderation, data extraction, and high-throughput pipelines', pricing: '$0.25/1M input, $1.25/1M output', contextWindow: '200K tokens', speed: 'fast', related: ['claude-3-sonnet', 'gpt-4o-mini', 'gemini-2-flash'] },
+      { slug: 'gemini-2-flash', name: 'Gemini 2.0 Flash', provider: 'Google', category: 'Google', description: 'Google fast multimodal model with massive context window and grounding capabilities.', strengths: ['1M token context window', 'Very fast inference', 'Native Google Search grounding', 'Multimodal input support'], weaknesses: ['Less consistent on nuanced tasks', 'Newer ecosystem', 'Output quality varies'], bestFor: 'Processing large documents, search-grounded responses, and multimodal analysis at speed', pricing: 'Free tier available, $0.10/1M input', contextWindow: '1M tokens', speed: 'fast', related: ['gemini-2-pro', 'gpt-4o-mini', 'claude-3-haiku'] },
+      { slug: 'gemini-2-pro', name: 'Gemini 2.0 Pro', provider: 'Google', category: 'Google', description: 'Google premium model with deep reasoning, coding, and multimodal understanding.', strengths: ['Excellent code generation', 'Strong multimodal reasoning', 'Large context window', 'Google ecosystem integration'], weaknesses: ['Higher latency than Flash', 'Premium pricing', 'Less proven in production'], bestFor: 'Code generation, complex analysis, and tasks requiring Google ecosystem integration', pricing: '$1.25/1M input, $5/1M output', contextWindow: '1M tokens', speed: 'medium', related: ['gemini-2-flash', 'gpt-4o', 'claude-3-opus'] },
+      { slug: 'grok-3', name: 'Grok 3', provider: 'xAI', category: 'xAI', description: 'xAI flagship model with real-time data access and strong reasoning capabilities.', strengths: ['Real-time data access', 'Strong reasoning benchmarks', 'Uncensored responses', 'Fast inference'], weaknesses: ['Limited ecosystem', 'X platform dependency', 'Newer with less track record'], bestFor: 'Real-time analysis, social media intelligence, and tasks needing current information', pricing: '$3/1M input, $15/1M output', contextWindow: '128K tokens', speed: 'medium', related: ['grok-3-mini', 'gpt-4o', 'claude-3-sonnet'] },
+      { slug: 'grok-3-mini', name: 'Grok 3 Mini', provider: 'xAI', category: 'xAI', description: 'Lightweight xAI model optimized for speed and cost-effective reasoning tasks.', strengths: ['Fast responses', 'Lower cost', 'Good reasoning for size', 'Real-time data access'], weaknesses: ['Less capable than full Grok 3', 'Limited ecosystem', 'Newer model'], bestFor: 'Quick queries, real-time lookups, and cost-sensitive applications needing current data', pricing: '$0.30/1M input, $0.50/1M output', contextWindow: '128K tokens', speed: 'fast', related: ['grok-3', 'gpt-4o-mini', 'claude-3-haiku'] },
+      { slug: 'llama-3-70b', name: 'LLaMA 3 70B', provider: 'Meta', category: 'Meta', description: 'Meta open-weight large language model delivering near-GPT-4 performance with full customizability.', strengths: ['Open weights - run anywhere', 'Strong reasoning and coding', 'No API dependency', 'Fine-tunable for domains'], weaknesses: ['Requires significant compute', 'No built-in safety guardrails', 'Community support only'], bestFor: 'Self-hosted deployments, fine-tuning for specific domains, and privacy-sensitive applications', pricing: 'Free (self-hosted) or ~$0.80/1M via providers', contextWindow: '128K tokens', speed: 'medium', related: ['llama-3-8b', 'mixtral-8x7b', 'deepseek-v3'] },
+      { slug: 'llama-3-8b', name: 'LLaMA 3 8B', provider: 'Meta', category: 'Meta', description: 'Compact open-weight model that runs on consumer hardware with impressive capability for its size.', strengths: ['Runs on consumer GPUs', 'Open weights', 'Very fast inference', 'Good for edge deployment'], weaknesses: ['Limited on complex reasoning', 'Smaller knowledge base', 'Needs fine-tuning for best results'], bestFor: 'Edge deployment, mobile applications, and local AI assistants on limited hardware', pricing: 'Free (self-hosted) or ~$0.05/1M via providers', contextWindow: '128K tokens', speed: 'fast', related: ['llama-3-70b', 'phi-3', 'mistral-small'] },
+      { slug: 'deepseek-v3', name: 'DeepSeek V3', provider: 'DeepSeek', category: 'Open Source', description: 'Open-source model rivaling GPT-4 on coding and reasoning at a fraction of the cost.', strengths: ['Exceptional coding ability', 'Very low pricing', 'Strong math and reasoning', 'Open source'], weaknesses: ['Potential data privacy concerns', 'Less consistent on creative tasks', 'Limited ecosystem'], bestFor: 'Code generation, mathematical reasoning, and cost-sensitive technical workloads', pricing: '$0.27/1M input, $1.10/1M output', contextWindow: '128K tokens', speed: 'medium', related: ['deepseek-coder', 'gpt-4o', 'claude-3-sonnet'] },
+      { slug: 'deepseek-coder', name: 'DeepSeek Coder', provider: 'DeepSeek', category: 'Open Source', description: 'Specialized coding model trained on massive code corpora for development tasks.', strengths: ['Top-tier code generation', 'Multi-language support', 'Code completion and review', 'Very affordable'], weaknesses: ['Narrow focus on code', 'Weaker general knowledge', 'Less tested in production'], bestFor: 'Code completion, bug fixing, code review, and software development automation', pricing: '$0.14/1M input, $0.28/1M output', contextWindow: '128K tokens', speed: 'fast', related: ['deepseek-v3', 'codellama-34b', 'gpt-4o'] },
+      { slug: 'mistral-large', name: 'Mistral Large', provider: 'Mistral AI', category: 'Open Source', description: 'European AI flagship model with strong multilingual and reasoning capabilities.', strengths: ['Excellent multilingual support', 'Strong reasoning', 'EU data sovereignty options', 'Function calling support'], weaknesses: ['Smaller ecosystem', 'Less known brand', 'Limited multimodal'], bestFor: 'Multilingual applications, European compliance requirements, and complex function calling', pricing: '$2/1M input, $6/1M output', contextWindow: '128K tokens', speed: 'medium', related: ['mistral-small', 'mixtral-8x7b', 'claude-3-sonnet'] },
+      { slug: 'mistral-small', name: 'Mistral Small', provider: 'Mistral AI', category: 'Open Source', description: 'Efficient Mistral model balancing capability and cost for everyday tasks.', strengths: ['Good price-performance ratio', 'Fast inference', 'Solid multilingual', 'Low latency'], weaknesses: ['Limited reasoning depth', 'Smaller context window', 'Less creative output'], bestFor: 'Production chatbots, classification, and lightweight reasoning tasks', pricing: '$0.20/1M input, $0.60/1M output', contextWindow: '32K tokens', speed: 'fast', related: ['mistral-large', 'gpt-4o-mini', 'claude-3-haiku'] },
+      { slug: 'mixtral-8x7b', name: 'Mixtral 8x7B', provider: 'Mistral AI', category: 'Open Source', description: 'Mixture-of-experts model that activates only relevant parameters per query for efficiency.', strengths: ['Efficient MoE architecture', 'Open weights', 'Strong for its compute cost', 'Good at code and reasoning'], weaknesses: ['Large model size on disk', 'Complex to deploy', 'Inconsistent on some tasks'], bestFor: 'Self-hosted deployments needing strong performance with efficient inference', pricing: 'Free (self-hosted) or ~$0.50/1M via providers', contextWindow: '32K tokens', speed: 'medium', related: ['mistral-large', 'llama-3-70b', 'deepseek-v3'] },
+      { slug: 'codellama-34b', name: 'Code Llama 34B', provider: 'Meta', category: 'Meta', description: 'Meta specialized code generation model built on LLaMA architecture for developers.', strengths: ['Specialized for code', 'Open weights', 'Supports many languages', 'Infill and completion modes'], weaknesses: ['Older architecture', 'Limited general knowledge', 'Superseded by newer models'], bestFor: 'Code completion, generation, and review in self-hosted development environments', pricing: 'Free (self-hosted)', contextWindow: '16K tokens', speed: 'medium', related: ['deepseek-coder', 'llama-3-70b', 'mistral-large'] },
+      { slug: 'qwen-72b', name: 'Qwen 72B', provider: 'Alibaba', category: 'Open Source', description: 'Alibaba large open-source model with strong multilingual and coding performance.', strengths: ['Excellent Chinese and English', 'Strong coding benchmarks', 'Open weights', 'Large knowledge base'], weaknesses: ['Large compute requirements', 'Less tested in Western markets', 'Complex deployment'], bestFor: 'Multilingual applications especially involving Chinese, and large-scale text processing', pricing: 'Free (self-hosted) or ~$0.90/1M via providers', contextWindow: '128K tokens', speed: 'medium', related: ['llama-3-70b', 'deepseek-v3', 'mistral-large'] },
+      { slug: 'phi-3', name: 'Phi-3', provider: 'Microsoft', category: 'Open Source', description: 'Microsoft compact model achieving remarkable performance for its small size through data curation.', strengths: ['Tiny model, strong results', 'Runs on phones and laptops', 'Microsoft backing', 'Great for edge AI'], weaknesses: ['Limited on complex tasks', 'Small knowledge cutoff', 'Less creative'], bestFor: 'On-device AI, mobile apps, and edge deployments where size and speed matter most', pricing: 'Free (self-hosted)', contextWindow: '128K tokens', speed: 'fast', related: ['llama-3-8b', 'mistral-small', 'gemini-2-flash'] },
+      { slug: 'command-r-plus', name: 'Command R+', provider: 'Cohere', category: 'Open Source', description: 'Cohere enterprise-focused model with built-in RAG, tool use, and citation capabilities.', strengths: ['Built-in RAG and citations', 'Enterprise tool integration', 'Strong at structured output', 'Multilingual'], weaknesses: ['Smaller community', 'Less known', 'Weaker on creative tasks'], bestFor: 'Enterprise search, RAG applications, and workflows requiring cited, grounded responses', pricing: '$2.50/1M input, $10/1M output', contextWindow: '128K tokens', speed: 'medium', related: ['gpt-4o', 'claude-3-sonnet', 'mistral-large'] },
+    ];
+
+    if (p.startsWith('/models/') && p !== '/models/') {
+      const slug = p.replace('/models/', '').replace(/\/$/, '');
+      const model = CP_MODELS.find(m => m.slug === slug);
+      if (!model) return new Response('Not Found', { status: 404 });
+      const relatedHtml = model.related.map(r => { const rm = CP_MODELS.find(m => m.slug === r); return rm ? `<a href="/models/${r}" style="display:inline-block;padding:8px 16px;background:#1a1a2e;border:1px solid #333;border-radius:8px;color:#ccc;text-decoration:none;margin:4px">${rm.name}</a>` : ''; }).join('');
+      const pageHtml = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${model.name} - AI Model Comparison | CarPool by BlackRoad</title><meta name="description" content="${model.description}"><link rel="canonical" href="https://carpool.blackroad.io/models/${model.slug}"><meta property="og:title" content="${model.name} - AI Model Comparison | CarPool"><meta property="og:description" content="${model.description}"><meta property="og:url" content="https://carpool.blackroad.io/models/${model.slug}"><meta property="og:type" content="article"><meta property="og:site_name" content="CarPool by BlackRoad"><script type="application/ld+json">${JSON.stringify({"@context":"https://schema.org","@type":"SoftwareApplication","name":model.name,"description":model.description,"applicationCategory":"AI Model","operatingSystem":"Cloud","offers":{"@type":"Offer","description":model.pricing},"author":{"@type":"Organization","name":model.provider}})}</script><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a1a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.6}a{color:#7B93DB}.container{max-width:800px;margin:0 auto;padding:40px 20px}.badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:600;background:#1a1a2e;border:1px solid #333;margin-bottom:16px}.specs{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:24px 0}.spec-card{background:#111;border:1px solid #222;border-radius:12px;padding:16px}.spec-label{font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px}.spec-value{font-size:18px;margin-top:4px}.section{margin:32px 0}.section h2{font-size:20px;margin-bottom:12px;color:#fff}ul.list{list-style:none;padding:0}ul.list li{padding:8px 0;border-bottom:1px solid #1a1a2e}.cta{display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#FF1D6C,#F5A623);color:#fff;border-radius:12px;text-decoration:none;font-weight:600;margin-top:24px}.nav{padding:20px;border-bottom:1px solid #1a1a2e;display:flex;justify-content:space-between;align-items:center}.nav a{color:#ccc;text-decoration:none}</style></head><body><nav class="nav"><a href="/">CarPool</a><a href="/models">All Models</a></nav><div class="container"><span class="badge">${model.category}</span><h1 style="font-size:36px;margin-bottom:8px">${model.name}</h1><p style="color:#aaa;font-size:18px;margin-bottom:24px">by ${model.provider}</p><p style="font-size:16px;margin-bottom:32px">${model.description}</p><div class="specs"><div class="spec-card"><div class="spec-label">Context Window</div><div class="spec-value">${model.contextWindow}</div></div><div class="spec-card"><div class="spec-label">Speed</div><div class="spec-value" style="text-transform:capitalize">${model.speed}</div></div><div class="spec-card"><div class="spec-label">Pricing</div><div class="spec-value" style="font-size:14px">${model.pricing}</div></div><div class="spec-card"><div class="spec-label">Provider</div><div class="spec-value">${model.provider}</div></div></div><div class="section"><h2>Strengths</h2><ul class="list">${model.strengths.map(s=>'<li style="color:#4CAF50">'+s+'</li>').join('')}</ul></div><div class="section"><h2>Weaknesses</h2><ul class="list">${model.weaknesses.map(w=>'<li style="color:#FF5252">'+w+'</li>').join('')}</ul></div><div class="section"><h2>Best For</h2><p style="background:#111;padding:16px;border-radius:12px;border:1px solid #222">${model.bestFor}</p></div><div class="section"><h2>Related Models</h2><div>${relatedHtml}</div></div><div style="text-align:center;margin-top:40px"><a href="/" class="cta">Route via CarPool</a></div></div><footer style="text-align:center;padding:40px;color:#555;font-size:13px;border-top:1px solid #1a1a2e;margin-top:60px">&#169; 2025-2026 BlackRoad OS, Inc. All rights reserved.</footer><script>(function(){var d={path:location.pathname,ref:document.referrer,w:screen.width,h:screen.height,t:Date.now()};navigator.sendBeacon&&navigator.sendBeacon('/api/analytics',JSON.stringify(d))})()</script></body></html>`;
+      return new Response(pageHtml, {headers:{'Content-Type':'text/html;charset=utf-8'}});
+    }
+
+    if (p === '/models' || p === '/models/') {
+      const rows = CP_MODELS.map(m=>`<tr><td style="padding:12px"><a href="/models/${m.slug}" style="color:#7B93DB;text-decoration:none;font-weight:600">${m.name}</a></td><td style="padding:12px;color:#aaa">${m.provider}</td><td style="padding:12px;color:#aaa">${m.contextWindow}</td><td style="padding:12px;text-transform:capitalize">${m.speed}</td><td style="padding:12px;font-size:13px;color:#888">${m.pricing}</td></tr>`).join('');
+      const indexHtml = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Model Comparison - 20+ Models Compared | CarPool by BlackRoad</title><meta name="description" content="Compare 20+ AI models side by side. GPT-4o, Claude 3, Gemini 2, Grok 3, LLaMA 3, and more. Pricing, speed, context windows, and capabilities."><link rel="canonical" href="https://carpool.blackroad.io/models"><meta property="og:title" content="AI Model Comparison | CarPool by BlackRoad"><meta property="og:description" content="Compare 20+ AI models side by side. Find the right model for your workload."><meta property="og:url" content="https://carpool.blackroad.io/models"><meta property="og:type" content="website"><script type="application/ld+json">${JSON.stringify({"@context":"https://schema.org","@type":"CollectionPage","name":"AI Model Comparison","description":"Compare 20+ AI models side by side","url":"https://carpool.blackroad.io/models","numberOfItems":CP_MODELS.length,"provider":{"@type":"Organization","name":"BlackRoad OS, Inc."}})}</script><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a1a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.6}a{color:#7B93DB}.container{max-width:1000px;margin:0 auto;padding:40px 20px}table{width:100%;border-collapse:collapse;margin-top:24px}th{text-align:left;padding:12px;border-bottom:2px solid #333;color:#fff;font-size:13px;text-transform:uppercase;letter-spacing:1px}td{border-bottom:1px solid #1a1a2e}.nav{padding:20px;border-bottom:1px solid #1a1a2e;display:flex;justify-content:space-between;align-items:center}.nav a{color:#ccc;text-decoration:none}.cta{display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#FF1D6C,#F5A623);color:#fff;border-radius:12px;text-decoration:none;font-weight:600;margin-top:32px}</style></head><body><nav class="nav"><a href="/">CarPool</a><a href="/models">All Models</a></nav><div class="container"><h1 style="font-size:36px;margin-bottom:8px">AI Model Comparison</h1><p style="color:#aaa;font-size:18px;margin-bottom:24px">Compare ${CP_MODELS.length} AI models side by side. Find the right model for your workload.</p><table><thead><tr><th>Model</th><th>Provider</th><th>Context</th><th>Speed</th><th>Pricing</th></tr></thead><tbody>${rows}</tbody></table><div style="text-align:center;margin-top:48px"><a href="/" class="cta">Route AI Models via CarPool</a></div></div><footer style="text-align:center;padding:40px;color:#555;font-size:13px;border-top:1px solid #1a1a2e;margin-top:60px">&#169; 2025-2026 BlackRoad OS, Inc. All rights reserved.</footer></body></html>`;
+      return new Response(indexHtml, {headers:{'Content-Type':'text/html;charset=utf-8'}});
+    }
+
+    if (p === '/sitemap.xml') {
+      const modelUrls = CP_MODELS.map(m=>'  <url><loc>https://carpool.blackroad.io/models/'+m.slug+'</loc><changefreq>weekly</changefreq><priority>0.8</priority></url>').join('\n');
+      return new Response('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>https://carpool.blackroad.io/</loc><lastmod>'+new Date().toISOString().split('T')[0]+'</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url>\n  <url><loc>https://carpool.blackroad.io/models</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>\n'+modelUrls+'\n</urlset>', {headers:{'Content-Type':'application/xml'}});
+    }
+
+    if (p === '/robots.txt') {
+      return new Response('User-agent: *\nAllow: /\nAllow: /models/\nSitemap: https://carpool.blackroad.io/sitemap.xml\n\nUser-agent: GPTBot\nDisallow: /\n\nUser-agent: ChatGPT-User\nDisallow: /\n\nUser-agent: CCBot\nDisallow: /', {headers:{'Content-Type':'text/plain'}});
+    }
 
     try {
       if (!dbReady) { await env.DB.batch([
@@ -421,8 +502,15 @@ export default {
       // ─── Execute a route (hand off between AIs) ───
       if (p === '/api/handoff' && request.method === 'POST') {
         const body = await request.json();
-        const {from, to, message} = body;
-        if (!from || !to || !message) return json({error:'from, to, message required'},cors,400);
+        const from = body.from || body.from_agent || '';
+        const to = body.to || body.to_agent || '';
+        const message = body.message || body.task || '';
+        if (!from || !to || !message) return json({error:'from, to, message required (also accepts from_agent, to_agent, task)'},cors,400);
+        // Log to handoffs table
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_handoffs (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, task TEXT, context TEXT DEFAULT '{}', status TEXT DEFAULT 'pending', priority TEXT DEFAULT 'normal', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)").run();
+          await env.DB.prepare("INSERT INTO cp_handoffs (id,from_agent,to_agent,task,context,priority) VALUES (?,?,?,?,?,?)").bind(crypto.randomUUID().slice(0,12),from,to,message,JSON.stringify(body.context||{}),body.priority||'normal').run();
+        } catch{}
         const start = Date.now();
 
         const sys = `You are part of CarPool on BlackRoad OS. You received a hand-off from the "${from}" AI provider. Process this and respond as the "${to}" AI. Be helpful, concise, and reference that this is a cross-AI collaboration.`;
@@ -1963,6 +2051,159 @@ export default {
       }
 
       // ═══════════════════════════════════════════════════════════════
+      // ENHANCED: Task handoffs
+      // ═══════════════════════════════════════════════════════════════
+      if (p === '/api/handoff' && request.method === 'POST') {
+        if (!env.DB) return json({error:'no db'},cors,500);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_handoffs (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, task TEXT, context TEXT DEFAULT '{}', status TEXT DEFAULT 'pending', priority TEXT DEFAULT 'normal', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)").run();
+        const body = await request.json();
+        const id = crypto.randomUUID().slice(0,12);
+        await env.DB.prepare("INSERT INTO cp_handoffs (id,from_agent,to_agent,task,context,priority) VALUES (?,?,?,?,?,?)").bind(id,body.from_agent||'',body.to_agent||'',body.task||'',JSON.stringify(body.context||{}),body.priority||'normal').run();
+        return json({ok:true,id,status:'pending'},cors,201);
+      }
+      if (p === '/api/handoffs' && request.method === 'GET') {
+        if (!env.DB) return json({handoffs:[]},cors);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_handoffs (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, task TEXT, context TEXT DEFAULT '{}', status TEXT DEFAULT 'pending', priority TEXT DEFAULT 'normal', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)").run(); } catch{}
+        const agent = url.searchParams.get('agent'); const status = url.searchParams.get('status');
+        let q = 'SELECT * FROM cp_handoffs WHERE 1=1'; const b = [];
+        if (agent) { q += ' AND (from_agent = ? OR to_agent = ?)'; b.push(agent,agent); }
+        if (status) { q += ' AND status = ?'; b.push(status); }
+        q += ' ORDER BY created_at DESC LIMIT 50';
+        const rows = await env.DB.prepare(q).bind(...b).all();
+        return json({handoffs:rows.results},cors);
+      }
+      const handoffAction = p.match(/^\/api\/handoffs\/([^/]+)\/(accept|complete)$/);
+      if (handoffAction && request.method === 'POST') {
+        if (!env.DB) return json({error:'no db'},cors,500);
+        const newStatus = handoffAction[2] === 'accept' ? 'active' : 'completed';
+        await env.DB.prepare("UPDATE cp_handoffs SET status = ?, completed_at = CASE WHEN ? = 'completed' THEN datetime('now') ELSE completed_at END WHERE id = ?").bind(newStatus,newStatus,handoffAction[1]).run();
+        return json({ok:true,status:newStatus},cors);
+      }
+
+      // ENHANCED: Agent messaging
+      if (p === '/api/messages' && request.method === 'POST') {
+        if (!env.DB) return json({error:'no db'},cors,500);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_messages (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, channel TEXT DEFAULT 'direct', content TEXT, metadata TEXT DEFAULT '{}', read INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))").run();
+        const body = await request.json();
+        const id = crypto.randomUUID().slice(0,12);
+        await env.DB.prepare("INSERT INTO cp_messages (id,from_agent,to_agent,channel,content,metadata) VALUES (?,?,?,?,?,?)").bind(id,body.from_agent||'',body.to_agent||'',body.channel||'direct',body.content||'',JSON.stringify(body.metadata||{})).run();
+        return json({ok:true,id},cors,201);
+      }
+      if (p === '/api/messages' && request.method === 'GET') {
+        if (!env.DB) return json({messages:[]},cors);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_messages (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, channel TEXT DEFAULT 'direct', content TEXT, metadata TEXT DEFAULT '{}', read INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))").run(); } catch{}
+        const agent = url.searchParams.get('agent'); const ch = url.searchParams.get('channel');
+        let q = 'SELECT * FROM cp_messages WHERE 1=1'; const b = [];
+        if (agent) { q += ' AND (from_agent = ? OR to_agent = ?)'; b.push(agent,agent); }
+        if (ch) { q += ' AND channel = ?'; b.push(ch); }
+        q += ' ORDER BY created_at DESC LIMIT 50';
+        const rows = await env.DB.prepare(q).bind(...b).all();
+        return json({messages:rows.results},cors);
+      }
+
+      // ENHANCED: Shared memory
+      if (p === '/api/memory' && request.method === 'POST') {
+        if (!env.DB) return json({error:'no db'},cors,500);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_memory (id TEXT PRIMARY KEY, key TEXT UNIQUE, value TEXT, tier TEXT DEFAULT 'hot', owner TEXT, created_at TEXT DEFAULT (datetime('now')))").run();
+        const body = await request.json();
+        await env.DB.prepare("INSERT OR REPLACE INTO cp_memory (id,key,value,tier,owner) VALUES (?,?,?,?,?)").bind(crypto.randomUUID().slice(0,12),body.key,JSON.stringify(body.value),body.tier||'hot',body.owner||'system').run();
+        return json({ok:true,key:body.key},cors,201);
+      }
+      // ENHANCED: Memory consolidation (hot→warm→cold)
+      if (p === '/api/memory/consolidate' && request.method === 'POST') {
+        if (!env.DB) return json({error:'no db'},cors,500);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_memory (id TEXT PRIMARY KEY, key TEXT UNIQUE, value TEXT, tier TEXT DEFAULT 'hot', owner TEXT, created_at TEXT DEFAULT (datetime('now')))").run(); } catch{}
+        const hotToWarm = await env.DB.prepare("UPDATE cp_memory SET tier = 'warm' WHERE tier = 'hot' AND created_at < datetime('now','-1 day')").run();
+        const warmToCold = await env.DB.prepare("UPDATE cp_memory SET tier = 'cold' WHERE tier = 'warm' AND created_at < datetime('now','-7 days')").run();
+        return json({ok:true,consolidated:{hot_to_warm:hotToWarm.meta?.changes||0,warm_to_cold:warmToCold.meta?.changes||0}},cors);
+      }
+
+      // ENHANCED: Memory search
+      if (p === '/api/memory/search' && request.method === 'GET') {
+        if (!env.DB) return json({results:[]},cors);
+        const q = url.searchParams.get('q') || '';
+        const rows = await env.DB.prepare("SELECT * FROM cp_memory WHERE key LIKE ? OR value LIKE ? ORDER BY created_at DESC LIMIT 50").bind(`%${q}%`,`%${q}%`).all();
+        return json({results:(rows.results||[]).map(r=>({key:r.key,value:JSON.parse(r.value||'null'),tier:r.tier,owner:r.owner})),count:(rows.results||[]).length},cors);
+      }
+
+      // ENHANCED: Memory stats
+      if (p === '/api/memory/stats' && request.method === 'GET') {
+        if (!env.DB) return json({total:0,by_tier:{}},cors);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_memory (id TEXT PRIMARY KEY, key TEXT UNIQUE, value TEXT, tier TEXT DEFAULT 'hot', owner TEXT, created_at TEXT DEFAULT (datetime('now')))").run(); } catch{}
+        const byTier = await env.DB.prepare("SELECT tier, COUNT(*) as cnt FROM cp_memory GROUP BY tier").all();
+        const total = await env.DB.prepare("SELECT COUNT(*) as cnt FROM cp_memory").first();
+        const oldest = await env.DB.prepare("SELECT MIN(created_at) as ts FROM cp_memory").first();
+        const newest = await env.DB.prepare("SELECT MAX(created_at) as ts FROM cp_memory").first();
+        return json({total:total?.cnt||0,by_tier:(byTier.results||[]).reduce((a,r)=>{a[r.tier]=r.cnt;return a;},{}),oldest:oldest?.ts,newest:newest?.ts},cors);
+      }
+
+      // ENHANCED: Agent context builder
+      if (p === '/api/context' && request.method === 'POST') {
+        if (!env.DB) return json({context:{}},cors);
+        const body = await request.json();
+        const agentId = body.agent_id || 'roadie';
+        const context = {agent:agentId,memories:[],handoffs:[],messages:[]};
+        try {
+          const mems = await env.DB.prepare("SELECT key,value,tier FROM cp_memory WHERE tier = 'hot' ORDER BY created_at DESC LIMIT 10").all();
+          context.memories = (mems.results||[]).map(r=>({key:r.key,value:JSON.parse(r.value||'null'),tier:r.tier}));
+        } catch{}
+        try {
+          const hoffs = await env.DB.prepare("SELECT * FROM cp_handoffs WHERE (from_agent = ? OR to_agent = ?) AND status != 'completed' ORDER BY created_at DESC LIMIT 5").bind(agentId,agentId).all();
+          context.handoffs = hoffs.results||[];
+        } catch{}
+        try {
+          const msgs = await env.DB.prepare("SELECT * FROM cp_messages WHERE (from_agent = ? OR to_agent = ?) ORDER BY created_at DESC LIMIT 10").bind(agentId,agentId).all();
+          context.messages = msgs.results||[];
+        } catch{}
+        return json({context},cors);
+      }
+
+      // ENHANCED: Workflow templates
+      if (p === '/api/workflow-templates' && request.method === 'GET') {
+        return json({templates:[
+          {id:'content-campaign',name:'Content Campaign',steps:['roadie:initiate','cecilia:plan','calliope:draft','sapphira:design','anastasia:refine','backroad:distribute'],agents:['roadie','cecilia','calliope','sapphira','anastasia'],products:['roadtrip','blackboard','backroad']},
+          {id:'learning-session',name:'Learning Session',steps:['roadie:greet','sophia:guide','alice:research','roadworld:simulate','lucidia:consolidate'],agents:['roadie','sophia','alice','lucidia'],products:['roadie','roadview','roadworld']},
+          {id:'business-order',name:'Business Order',steps:['roadie:alert','octavia:coordinate','anastasia:invoice','sebastian:communicate','gematria:analyze','lucidia:learn'],agents:['roadie','octavia','anastasia','sebastian','gematria','lucidia'],products:['roadwork','roadside','roadcoin']},
+          {id:'code-review',name:'Code Review',steps:['roadie:start','silas:analyze','anastasia:refine','portia:compliance'],agents:['roadie','silas','anastasia','portia'],products:['roadcode','roadchain']},
+          {id:'publish-article',name:'Publish Article',steps:['calliope:write','alexandria:archive','portia:review','lucidia:align','roadbook:publish'],agents:['calliope','alexandria','portia','lucidia'],products:['roadbook','roadchain','roadcoin']},
+        ]},cors);
+      }
+
+      const memKeyMatch = p.match(/^\/api\/memory\/(.+)$/);
+      if (memKeyMatch && request.method === 'GET') {
+        if (!env.DB) return json({error:'no db'},cors,500);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS cp_memory (id TEXT PRIMARY KEY, key TEXT UNIQUE, value TEXT, tier TEXT DEFAULT 'hot', owner TEXT, created_at TEXT DEFAULT (datetime('now')))").run(); } catch{}
+        const row = await env.DB.prepare('SELECT * FROM cp_memory WHERE key = ?').bind(decodeURIComponent(memKeyMatch[1])).first();
+        if (!row) return json({error:'not found'},cors,404);
+        return json({key:row.key,value:JSON.parse(row.value||'null'),tier:row.tier,owner:row.owner},cors);
+      }
+      if (p === '/api/memory' && request.method === 'GET') {
+        if (!env.DB) return json({entries:[]},cors);
+        const tier = url.searchParams.get('tier');
+        let q = 'SELECT * FROM cp_memory'; const b = [];
+        if (tier) { q += ' WHERE tier = ?'; b.push(tier); }
+        q += ' ORDER BY created_at DESC LIMIT 100';
+        const rows = await env.DB.prepare(q).bind(...b).all();
+        return json({entries:rows.results.map(r=>({key:r.key,tier:r.tier,owner:r.owner}))},cors);
+      }
+
+      // ENHANCED: Task routing
+      if (p === '/api/route' && request.method === 'POST') {
+        const body = await request.json();
+        const task = (body.task||'').toLowerCase();
+        let agent = 'roadie', product = 'roadtrip';
+        if (task.includes('code')||task.includes('deploy')||task.includes('bug')) { agent = 'silas'; product = 'roadcode'; }
+        else if (task.includes('design')||task.includes('visual')||task.includes('brand')) { agent = 'sapphira'; product = 'blackboard'; }
+        else if (task.includes('write')||task.includes('story')||task.includes('content')) { agent = 'calliope'; product = 'roadbook'; }
+        else if (task.includes('search')||task.includes('research')) { agent = 'alice'; product = 'roadview'; }
+        else if (task.includes('security')||task.includes('auth')||task.includes('encrypt')) { agent = 'valeria'; product = 'carkeys'; }
+        else if (task.includes('invoice')||task.includes('business')||task.includes('automate')) { agent = 'octavia'; product = 'roadwork'; }
+        else if (task.includes('teach')||task.includes('learn')||task.includes('tutor')) { agent = 'roadie'; product = 'roadie'; }
+        else if (task.includes('publish')||task.includes('article')) { agent = 'alexandria'; product = 'roadbook'; }
+        return json({recommended_agent:agent,recommended_product:product,task:body.task},cors);
+      }
+
+      // ═══════════════════════════════════════════════════════════════
       // CATCH-ALL
       // ═══════════════════════════════════════════════════════════════
       if (p.startsWith('/api/')) return json({error:'not found'},cors,404);
@@ -3022,4 +3263,6 @@ fetch('/api/stats').then(r=>r.json()).then(d=>{
   document.getElementById('stat-prompts').textContent=d.prompts||0;
   document.getElementById('stat-cache').textContent=d.cache_entries||0;
 }).catch(()=>{});
-</script></body></html>`;
+window.addEventListener('message',function(e){if(e.data</script></script>e.data.type==='blackroad-os:context'){window._osUser=e.data.user;window._osToken=e.data.token;}});if(window.parent!==window)window.parent.postMessage({type:'blackroad-os:request-context'},'*');
+</script><script>!function(){var b=document.createElement("div");b.style.cssText="position:fixed;top:0;left:0;right:0;z-index:99999;background:#0a0a0a;border-bottom:1px solid #1a1a1a;padding:6px 16px;display:flex;align-items:center;justify-content:space-between;font-family:sans-serif";b.innerHTML="<span style=\"font-size:11px;color:#737373\">Part of <a href=\"https://os.blackroad.io\" style=\"color:#f5f5f5;font-weight:600;text-decoration:none\">BlackRoad OS<\/a> \u2014 27 AI agents, 17 products<\/span><a href=\"https://os.blackroad.io\" style=\"font-size:10px;font-weight:600;padding:4px 12px;background:#f5f5f5;color:#000;border-radius:4px;text-decoration:none\">Try Free<\/a>";b.id="br-bar";if(!document.getElementById("br-bar")){document.body.prepend(b);document.body.style.paddingTop=(parseInt(getComputedStyle(document.body).paddingTop)||0)+32+"px"}if(!document.querySelector("[data-cta]")){var f=document.createElement("div");f.dataset.cta="1";f.style.cssText="border-top:1px solid #1a1a1a;padding:24px 16px;text-align:center;background:#0a0a0a;margin-top:32px";f.innerHTML="<div style=\"font-size:14px;font-weight:700;color:#f5f5f5;margin-bottom:6px\">BlackRoad OS<\/div><div style=\"font-size:11px;color:#737373;margin-bottom:12px\">17 products. 27 agents. Free to try.<\/div><a href=\"https://os.blackroad.io\" style=\"display:inline-block;padding:8px 24px;background:#f5f5f5;color:#000;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none\">Open BlackRoad OS<\/a>";document.body.appendChild(f)}}();</script>
+</body></html>`;
